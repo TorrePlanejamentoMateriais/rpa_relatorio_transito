@@ -172,6 +172,7 @@ print("Arquivo utilizado:", planilha_projeto_pep)
 pp = pd.read_excel(planilha_projeto_pep,header=1, usecols=lambda col: col != 0)
 pp.columns = ( pp.columns.str.lower() )
 pp.columns = pp.columns.str.replace(" ", "_")
+#print(pp.columns.tolist())
 
 planilha_siaki = arquivo_excel_mais_recente(
     pasta=PASTA_RESERVAS_SIAKI,
@@ -289,7 +290,7 @@ reservas_cliente_retira = set(cf["reserva"].dropna())
 #------------------------ fim conecta as planilhas ------------------------#
 
 #insere o arquivo em uma variavel
-arquivo_xlsx = Path(rf"C:\Users\F252727\Downloads\relatorio_transito{data_hoje}.xlsx")
+arquivo_xlsx = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\BI\BI_Relatorio_Transito\Dados_Transitos\Fatos\2026\OUTUBRO\relatorio_transito{data_hoje}.xlsx")
 
 #normaliza todas as colunas RESERVAS das planilhas.
 dfs = [rt, r2026, r11sp, r2025, cpe, sobn,lm,cf]
@@ -374,7 +375,7 @@ cpe   = cpe.rename(columns={"projeto": "projeto_cpe"})
 sobn  = sobn.rename(columns={"projeto": "projeto_sobn"})
 cf    = cf.rename(columns={"projeto": "projeto_cf"})
 #-------------- aplicando as merger ------------------#
-#equivalente ao left join para unir os dadosa
+#equivalente ao left join para unir os dados
 df = rt.merge(r2026[["chave", "projeto_2026", "cidade_projeto", "npipefy"]], on="chave", how="left")
 df = df.merge(r11sp[["reserva", "projeto_11sp"]], on="reserva", how="left")
 df = df.merge(r2025[["reserva", "projeto_2025"]], on="reserva", how="left")
@@ -657,9 +658,34 @@ for col in Datas:
     df[col] = pd.to_datetime(df[col],errors="coerce").dt.strftime("%d/%m/%Y")
 #--fim
 
+
+# Status que será reclassificado
+mask_aguardando = (
+    df["SITUACAO"].astype(str).str.strip()
+    == "AGUARDANDO COLETA/ATUALIZAÇÃO SISTÊMICA"
+)
+
+# Verifica se DATA EMISSAO NF está vazia
+mask_sem_nota = (
+    df["DATA EMISSAO NF"].isna() |
+    (df["DATA EMISSAO NF"].astype(str).str.strip() == "")
+)
+
+# Sem data da nota fiscal: EM SEPARACAO
+df.loc[
+    mask_aguardando & mask_sem_nota,
+    "SITUACAO"
+] = "EM SEPARACAO"
+
+# Com data da nota fiscal: EM EXPEDICAO
+df.loc[
+    mask_aguardando & ~mask_sem_nota,
+    "SITUACAO"
+] = "EM EXPEDICAO"
+
+
 df_fora_siaki = df[
     (df["SIAKI"] == "NAO") &
-    (df["CRIADO PELO USUARIO"].isin(["N5710399","N0094829","F273602","92051209","Z382963","N0078681","N0165836","F263756","Z403347","N5710399","N5988647","Z638603","F198444","Z428987","23008074","Z574957","N0178235","Z255065"])) &
     (df["LOCAL DE DESCARGA"].isin(locais_ld))
 ]
 
@@ -667,6 +693,32 @@ df_fora_siaki = df[
 df_sem_projeto = df[
     (df["PROJETO UNIFICADO"] == "") &
     (df["AREA"]== "PLANEJAMENTO")]
+
+# Agrupa por nome e conta reservas distintas
+df_resumo_sem_projeto = (
+    df_sem_projeto
+    .assign(
+        **{
+            "NOME COMPLETO": df_sem_projeto["NOME COMPLETO"]
+            .replace("", "USUARIO NAO IDENTIFICADO")
+            .fillna("USUARIO NAO IDENTIFICADO")
+        }
+    )
+    .groupby("NOME COMPLETO", as_index=False)
+    .agg(
+        **{
+            "QTD RESERVAS DISTINTAS": (
+                "RESERVA",
+                "nunique"
+            )
+        }
+    )
+    .sort_values(
+        by="QTD RESERVAS DISTINTAS",
+        ascending=False
+    )
+)
+
 
 df_ATRASO = df[
     (
@@ -685,12 +737,12 @@ df[["TIPO_IDENTIFICADOR", "NUMERO_IDENTIFICADOR", "CHAVE_CONSULTA"]] = (
 
 df["ID OS PIPEFY"] = (df["ID OS PIPEFY"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip())
 
-arquivo_identificador = Path(
-    f"C:\\Users\\F252727\\OneDrive - Claro SA\\Planilha de Atendimento\\base_relatorio_transito.xlsx"
-)
-df.to_excel(arquivo_identificador, index=False)
+#arquivo_identificador = Path(
+#    f"C:\\Users\\F252727\\OneDrive - Claro SA\\Planilha de Atendimento\\base_relatorio_transito.xlsx"
+#)
+#df.to_excel(arquivo_identificador, index=False)
 
-print("Base para Copilot Salvo!")
+#print("Base para Copilot Salvo!")
 
 #criar um novo arquivo xlsx
 writer = pd.ExcelWriter(arquivo_xlsx, engine='xlsxwriter')
@@ -703,10 +755,12 @@ if not df_fora_siaki.empty:
 
 if not df_sem_projeto.empty:
     df_sem_projeto.to_excel(writer, sheet_name="SEM PROJETO", index=False)
+
+if not df_resumo_sem_projeto.empty:
+    df_resumo_sem_projeto.to_excel(writer,sheet_name="RESUMO SEM PROJETO",index=False)    
         
 if not df_ATRASO.empty:
     df_ATRASO.to_excel(writer, sheet_name="ATRASADOS", index=False)
-
 
 workbook  = writer.book
     
@@ -718,11 +772,13 @@ if "SEM PROJETO" in writer.sheets:
     formatacao_excel(workbook,writer.sheets["SEM PROJETO"],df_sem_projeto)
 if "ATRASADOS" in writer.sheets:
     formatacao_excel(workbook,writer.sheets["ATRASADOS"],df_ATRASO)    
+if "RESUMO SEM PROJETO" in writer.sheets:
+    formatacao_excel(workbook,writer.sheets["RESUMO SEM PROJETO"],df_resumo_sem_projeto)
 
 writer.close()
 
 arquivo_xlsx = Path(arquivo_xlsx)#abrir xlsx para salvar em xlsb
-arquivo_xlsb = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\BI\BI_Relatorio_Transito\Dados_Transitos\Fatos\2026\SETEMBRO\relatorio_transito_{data_hoje}.xlsb" )
+arquivo_xlsb = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\Arquivos Relatorio de Transito\relatorio_transito_{data_hoje}.xlsb" )
 excel = win32.Dispatch("Excel.Application") #abrir excel para salvar em xlsb
 try: #verificar se o excel está aberto, caso contrário, continuar sem mostrar o excel
     excel.Visible = False #manter o excel oculto durante a manipulação
@@ -769,14 +825,14 @@ for col_nome in colunas:
 wb.SaveAs(str(arquivo_xlsb), FileFormat=50)  # 50 = XLSB
 wb.Close(False)
 excel.Quit()
-arquivo_xlsx.unlink(missing_ok=True)
+#arquivo_xlsx.unlink(missing_ok=True)
 
 
 #apaga XLSX temporário
 """ arquivo_xlsx_temp.unlink(missing_ok=True) """
 
 
-duracao = time.time() - inicio 
+duracao = time.time() - inicio
 minutos = int(duracao // 60) 
 segundos = int(duracao % 60)
 print(f"Processamento: {minutos:.2f} minutos")
