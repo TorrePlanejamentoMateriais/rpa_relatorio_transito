@@ -290,7 +290,7 @@ reservas_cliente_retira = set(cf["reserva"].dropna())
 #------------------------ fim conecta as planilhas ------------------------#
 
 #insere o arquivo em uma variavel
-arquivo_xlsx = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\BI\BI_Relatorio_Transito\Dados_Transitos\Fatos\2026\OUTUBRO\relatorio_transito{data_hoje}.xlsx")
+arquivo_xlsx = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\BI\BI_Relatorio_Transito\Dados_Transitos\Fatos\2026\NOVEMBRO\relatorio_transito{data_hoje}.xlsx")
 
 #normaliza todas as colunas RESERVAS das planilhas.
 dfs = [rt, r2026, r11sp, r2025, cpe, sobn,lm,cf]
@@ -387,6 +387,13 @@ df = df.merge(lg[["usuario", "nome_completo", "area"]], left_on="criado_pelo_usu
 df = df.merge(siaki[["reserva", "flag_siaki"]],on="reserva",how="left")
 df = df.merge(cf[["reserva", "projeto_cf"]], on="reserva", how="left")
 #-------------- fim das merger ------------------#
+
+# SAP 41001597: manter somente linhas da area PLANEJAMENTO
+
+sap = (df["cod_material_sap"].astype("string").str.strip().str.replace(r"\.0$", "", regex=True).str.lstrip("0"))
+area = df["area"].astype("string").str.strip().str.upper()
+df = df.loc[sap.ne("41001597").fillna(True)| area.eq("PLANEJAMENTO").fillna(False)].copy()
+
 
 #------- aplica busca no atendimento_i
 #df[["projeto_lm"]] = df["reserva"].apply(buscar_atendimento)
