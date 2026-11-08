@@ -1,4 +1,4 @@
-import pandas as pd
+﻿import pandas as pd
 import numpy as np
 import os
 import time
@@ -118,6 +118,201 @@ def separar_identificador(valor):
 
     return pd.Series([None, None, None])
 
+
+# Bases de localizacao: procurar junto ao script e na pasta do relatorio.
+# Para outra pasta, informe-a nesta variavel.
+PASTA_BASES_LOCALIZACAO = r"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\Arquivos Relatorio de Transito"
+
+_UFS_TRANSITO = set("AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO".split())
+
+def _texto_localizacao(serie):
+    return (serie.astype("string").str.strip().str.upper()
+            .str.replace(r"\.0$", "", regex=True)
+            .replace({"": pd.NA, "NAN": pd.NA, "NONE": pd.NA, "NULL": pd.NA}))
+
+def _base_localizacao(nome):
+    pastas = [Path(__file__).resolve().parent, Path(PASTA_RELATORIO_TRANSITO)]
+    if PASTA_BASES_LOCALIZACAO:
+        pastas.insert(0, Path(PASTA_BASES_LOCALIZACAO))
+    for pasta in pastas:
+        caminho = pasta / nome
+        if caminho.is_file():
+            base = pd.read_excel(caminho, engine="openpyxl", dtype="string")
+            base.columns = base.columns.astype(str).str.strip().str.lower()
+            print("Base de localizacao:", caminho)
+            return base
+    raise FileNotFoundError(f"Base {nome!r} nao encontrada. Coloque-a junto ao script "
+                            "ou configure PASTA_BASES_LOCALIZACAO.")
+
+def _coluna_localizacao(base, alternativas, nome):
+    for coluna in alternativas:
+        if coluna in base.columns:
+            return coluna
+    raise ValueError(f"{nome}: coluna obrigatoria ausente: {alternativas}. "
+                     f"Colunas encontradas: {list(base.columns)}")
+
+def _mapa_localizacao(base, chave, valor, nome):
+    dados = pd.DataFrame({"chave": _texto_localizacao(base[chave]),
+                          "valor": _texto_localizacao(base[valor])}).dropna().drop_duplicates()
+    conflitos = dados.groupby("chave")["valor"].nunique()
+    ambiguos = conflitos[conflitos.gt(1)].index
+    if len(ambiguos):
+        print(f"AVISO {nome}: chaves com mais de um resultado nao serao escolhidas "
+              f"automaticamente: {', '.join(map(str, ambiguos))}")
+    return dados.loc[~dados["chave"].isin(ambiguos)].drop_duplicates("chave").set_index("chave")["valor"]
+
+def _uf_do_endereco_localizacao(endereco):
+    if pd.isna(endereco):
+        return pd.NA
+    texto = str(endereco).upper().strip()
+    # Somente UF no final do endereco, com CEP opcional.
+    padrao = (r"(?:[,;/\-]|\s)\s*(" + "|".join(sorted(_UFS_TRANSITO))
+              + r")\s*(?:[,;/\-]?\s*(?:CEP\s*[:\-]?\s*)?\d{5}-?\d{3})?\s*$")
+    resultado = re.search(padrao, texto)
+    return resultado.group(1) if resultado else pd.NA
+
+def atualizar_localizacao_transito(rt):
+    """Executar imediatamente apos a leitura, antes dos filtros e demais regras.
+
+    As bases sao somente consultadas. Centros sao preenchidos no relatorio.
+    Resultados ausentes/ambiguos ficam vazios e sao registrados no log.
+    """
+    rt = rt.copy()
+    obrigatorias = {"cod_material_sap", "endereco", "cd_destino", "cd_origem"}
+    faltantes = obrigatorias.difference(rt.columns)
+    if faltantes:
+        raise ValueError(f"Relatorio sem colunas obrigatorias: {sorted(faltantes)}")
+    deposito = _base_localizacao("adhoc_deposito 1.xlsx")
+    massivo = _base_localizacao("centros massivo.xlsx")
+    centro = _base_localizacao("adhoc_centro 1.xlsx")
+    regional = _base_localizacao("adhoc_regional 1.xlsx")
+
+    # O anexo utiliza COD_CENTRO; aceitar tambem COD_TRANSITO.
+    dep_chave = _coluna_localizacao(deposito, ["cod_transito", "cod_centro"], "deposito")
+    dep_uf = _coluna_localizacao(deposito, ["sgl_uf", "uf"], "deposito")
+    reg_valor = _coluna_localizacao(regional, ["regional", "centro oeste"], "regional")
+    mapa_uf = _mapa_localizacao(deposito, dep_chave, dep_uf, "deposito")
+    mapa_descricao = _mapa_localizacao(centro, "cod_centro", "dsc_centro_distribuicao", "centro")
+    mapa_regional = _mapa_localizacao(regional, "uf", reg_valor, "regional")
+    # Prioridades definidas: SP -> N190 e RJ -> N290.
+    # Aplicadas apenas ao preenchimento de centros vazios.
+    massivo_preferencial = massivo.loc[
+        ~_texto_localizacao(massivo["uf"]).isin(["SP", "RJ"])
+        | (_texto_localizacao(massivo["uf"]).eq("SP") & _texto_localizacao(massivo["centros"]).eq("N190"))
+        | (_texto_localizacao(massivo["uf"]).eq("RJ") & _texto_localizacao(massivo["centros"]).eq("N290"))
+    ].copy()
+    mapa_massivo_uf = _mapa_localizacao(massivo_preferencial, "uf", "centros", "massivo UF -> CENTROS")
+    mapa_massivo_cd = _mapa_localizacao(massivo, "centros", "cd", "massivo CENTROS -> CD")
+    mapa_massivo_desc_uf = _mapa_localizacao(massivo_preferencial, "uf", "cd", "massivo UF -> CD")
+
+    sap = _texto_localizacao(rt["cod_material_sap"]).str.lstrip("0")
+    especial = sap.eq("41001597").fillna(False)
+    destino = _texto_localizacao(rt["cd_destino"])
+    origem = _texto_localizacao(rt["cd_origem"])
+
+    # 1. UF_DESTINO: endereco apenas para 41001597; deposito para os demais.
+    uf_destino = destino.map(mapa_uf).astype("string")
+    uf_destino.loc[especial] = rt.loc[especial, "endereco"].map(_uf_do_endereco_localizacao)
+    rt["uf_destino"] = uf_destino.where(uf_destino.isin(_UFS_TRANSITO), pd.NA)
+
+    # 2. CD_DESTINO: preencher somente vazios, se TODOS forem do material especial.
+    vazios = destino.isna()
+    if vazios.any():
+        if especial.loc[vazios].all():
+            novos = rt.loc[vazios, "uf_destino"].map(mapa_massivo_uf)
+            rt["cd_destino"] = rt["cd_destino"].astype("object")
+            rt.loc[vazios, "cd_destino"] = novos
+            print(f"Localizacao: {int(novos.notna().sum())} CD_DESTINO preenchido(s).")
+        else:
+            print(f"AVISO: existem {int((vazios & ~especial).sum())} CD_DESTINO vazio(s) "
+                  "de outros materiais. Preenchimento massivo nao executado.")
+    destino = _texto_localizacao(rt["cd_destino"])
+
+    # 3. DESCRICAO_CD_DESTINO: massivo para o especial, centro para os demais.
+    descricao = destino.map(mapa_descricao).astype("string")
+    descricao_especial = destino.loc[especial].map(mapa_massivo_cd)
+    # Sem centro: descricao por UF somente quando o nome do CD for inequivoco.
+    sem_centro = destino.loc[especial].isna()
+    descricao_especial.loc[sem_centro] = rt.loc[descricao_especial.index[sem_centro], "uf_destino"].map(mapa_massivo_desc_uf)
+    descricao.loc[especial] = descricao_especial
+    rt["descricao_cd_destino"] = descricao
+
+    # 4. UF_ORIGEM: sempre pelo centro original na base de depositos.
+    rt["uf_origem"] = origem.map(mapa_uf).astype("string")
+    rt["uf_origem"] = rt["uf_origem"].where(rt["uf_origem"].isin(_UFS_TRANSITO), pd.NA)
+    # 5. REGIONAL: sempre pela UF_DESTINO ja corrigida.
+    rt["regional"] = rt["uf_destino"].map(mapa_regional)
+    for coluna in ["uf_destino", "cd_destino", "descricao_cd_destino", "uf_origem", "regional"]:
+        quantidade = int(_texto_localizacao(rt[coluna]).isna().sum())
+        if quantidade:
+            print(f"AVISO localizacao: {coluna.upper()} com {quantidade} linha(s) sem resultado.")
+    return rt
+
+
+# NF triangular: usa a mesma pasta configurada para as bases de localizacao.
+PASTA_ZTMM028 = PASTA_BASES_LOCALIZACAO or PASTA_RELATORIO_TRANSITO
+PREFIXO_ZTMM028 = "ZTMM028_"
+
+def _normalizar_numero_ztmm(serie):
+    return (serie.astype("string").str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+            .replace({"": pd.NA, "NAN": pd.NA, "NONE": pd.NA,
+                      "NULL": pd.NA, "ERRO": pd.NA, "#N/A": pd.NA,
+                      "#VALUE!": pd.NA, "#REF!": pd.NA}))
+
+def inserir_nf_triangular(df, arquivo_ztmm):
+    """Insere NF TRIANGULAR e SERE NF TRIANGULAR no final, pela RESERVA."""
+    ztmm = pd.read_excel(
+        arquivo_ztmm,
+        sheet_name="Data",
+        usecols=["Nº reserva", "NF TRIANGULAR", "SERE NF TRIANGULAR"],
+        dtype="string",
+        engine="openpyxl"
+    )
+    ztmm.columns = ["reserva", "nf", "serie"]
+    for coluna in ztmm.columns:
+        ztmm[coluna] = _normalizar_numero_ztmm(ztmm[coluna])
+
+    reserva_valida = ztmm["reserva"].str.fullmatch(r"\d+", na=False)
+    nf_valida = (ztmm["nf"].str.fullmatch(r"\d+", na=False)
+                 & ztmm["nf"].str.lstrip("0").ne(""))
+    serie_valida = (ztmm["serie"].str.fullmatch(r"\d+", na=False)
+                    & ztmm["serie"].str.lstrip("0").ne(""))
+
+    ztmm = ztmm.loc[
+        reserva_valida & nf_valida,
+        ["reserva", "nf", "serie"]
+    ].copy()
+    ztmm.loc[~serie_valida.loc[ztmm.index], "serie"] = pd.NA
+    ztmm = ztmm.drop_duplicates(["reserva", "nf", "serie"])
+
+    def consolidar(grupo):
+        # Se uma reserva tiver mais de uma NF, mantem todas sem duplicar o relatorio.
+        nfs, series = [], []
+        for nf, serie in grupo[["nf", "serie"]].itertuples(index=False, name=None):
+            nfs.append(nf)
+            series.append("" if pd.isna(serie) else serie)
+        return pd.Series({
+            "NF TRIANGULAR": "; ".join(nfs),
+            "SERE NF TRIANGULAR": "; ".join(series).strip("; ")
+        })
+
+    registros = []
+    for reserva, grupo in ztmm.groupby("reserva", sort=False):
+        valores = consolidar(grupo)
+        registros.append((reserva, valores["NF TRIANGULAR"], valores["SERE NF TRIANGULAR"]))
+    mapa = pd.DataFrame(registros, columns=["reserva", "NF TRIANGULAR", "SERE NF TRIANGULAR"]).set_index("reserva")
+
+    reserva_relatorio = _normalizar_numero_ztmm(df["RESERVA"])
+    df["NF TRIANGULAR"] = reserva_relatorio.map(mapa["NF TRIANGULAR"])
+    df["SERE NF TRIANGULAR"] = reserva_relatorio.map(mapa["SERE NF TRIANGULAR"])
+    df["SERE NF TRIANGULAR"] = df["SERE NF TRIANGULAR"].replace("", pd.NA)
+
+    print(
+        f"NF triangular: {int(df['NF TRIANGULAR'].notna().sum())} linha(s) preenchida(s)."
+    )
+    return df
+
 #pega a data atual
 data_hoje = datetime.now().strftime("%Y-%m-%d")
 
@@ -128,6 +323,7 @@ planilha_de_transito = arquivo_excel_mais_recente(
 print("Arquivo utilizado:", planilha_de_transito)
 rt = pd.read_excel(planilha_de_transito)
 rt.columns = (rt.columns.str.lower())
+rt = atualizar_localizacao_transito(rt)
 rt = rt[
     (rt["dt_criacao_reserva"] >= "2025-01-01") &
     (rt["dt_criacao_reserva"] <  "2027-01-01")
@@ -290,7 +486,7 @@ reservas_cliente_retira = set(cf["reserva"].dropna())
 #------------------------ fim conecta as planilhas ------------------------#
 
 #insere o arquivo em uma variavel
-arquivo_xlsx = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\BI\BI_Relatorio_Transito\Dados_Transitos\Fatos\2026\NOVEMBRO\relatorio_transito{data_hoje}.xlsx")
+arquivo_xlsx = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\BI\BI_Relatorio_Transito\Dados_Transitos\Fatos\2026\outubro\relatorio_transito{data_hoje}.xlsx")
 
 #normaliza todas as colunas RESERVAS das planilhas.
 dfs = [rt, r2026, r11sp, r2025, cpe, sobn,lm,cf]
@@ -588,7 +784,7 @@ df = df.drop('chave', axis=1)
 df = df.drop('cod_empresa', axis=1)
 df = df.drop('descricao_empresa', axis=1)
 #df = df.drop('regional', axis=1) #---
-df = df.drop('descricao_cd_destino', axis=1)
+# DESCRICAO_CD_DESTINO mantida: preenchida na etapa inicial de localizacao.
 #df = df.drop('cidade', axis=1) #----
 df = df.drop('projeto_geral', axis=1)
 df = df.drop('descricao_cd_origem', axis=1)
@@ -598,8 +794,21 @@ df = df.drop('lead_time', axis=1)
 df["projeto_unificado"] = (df["projeto_unificado"].str.normalize("NFKD").str.encode("ascii", errors="ignore").str.decode("utf-8").str.replace(r"\s+", " ", regex=True).str.upper() )#padroniza a coluna projeto unificado
 df["cidade_projeto"] = (df["cidade_projeto"].str.normalize("NFKD").str.encode("ascii", errors="ignore").str.decode("utf-8").str.replace(r"\s+", " ", regex=True).str.upper()) #padroniza a coluna projeto geral
 df = df.fillna("") #retira o NaN
+# Prioridade final: todo material 41001597 pertence ao projeto GPON Resid.
+# Aplicar depois da padronizacao para preservar exatamente o texto solicitado.
+mask_gpon_resid = (
+    df["cod_material_sap"].astype("string").str.strip()
+    .str.replace(r"\.0$", "", regex=True).str.lstrip("0")
+    .eq("41001597").fillna(False)
+)
+df.loc[mask_gpon_resid, "projeto_unificado"] = "GPON Resid"
+
 df.columns = (df.columns.str.upper())#transformar colunas em maiusculo
 df.columns = df.columns.str.replace("_", " ").str.upper()#remove _ e deixa os espaços
+planilha_ztmm028 = arquivo_excel_mais_recente(PASTA_ZTMM028, PREFIXO_ZTMM028)
+print("Arquivo utilizado para NF triangular:", planilha_ztmm028)
+df = inserir_nf_triangular(df, planilha_ztmm028)
+
 df = df.sort_values(by=["DT CRIACAO RESERVA", "RESERVA"],ascending=[False, True]) #ordena por data de criaçao da reserva  
 
 # -------- salvar arquivo de reserva e projeto --------
@@ -751,6 +960,10 @@ df["ID OS PIPEFY"] = (df["ID OS PIPEFY"].astype(str).str.replace(r"\.0$", "", re
 
 #print("Base para Copilot Salvo!")
 
+# Manter as duas colunas de triangulacao no final, inclusive apos os identificadores.
+colunas_triangular = ["NF TRIANGULAR", "SERE NF TRIANGULAR"]
+df = df[[c for c in df.columns if c not in colunas_triangular] + colunas_triangular]
+
 #criar um novo arquivo xlsx
 writer = pd.ExcelWriter(arquivo_xlsx, engine='xlsxwriter')
 
@@ -786,6 +999,7 @@ writer.close()
 
 arquivo_xlsx = Path(arquivo_xlsx)#abrir xlsx para salvar em xlsb
 arquivo_xlsb = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\Arquivos Relatorio de Transito\relatorio_transito_{data_hoje}.xlsb" )
+# Se o arquivo já existir, remove antes de gerar o novo
 excel = win32.Dispatch("Excel.Application") #abrir excel para salvar em xlsb
 try: #verificar se o excel está aberto, caso contrário, continuar sem mostrar o excel
     excel.Visible = False #manter o excel oculto durante a manipulação
