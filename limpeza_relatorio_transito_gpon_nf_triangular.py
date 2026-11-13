@@ -388,7 +388,7 @@ for col in COLUNAS_TEXTO:
 
 planinha_atendimento = arquivo_excel_mais_recente(
     pasta=PASTA_PLAN_ATENDIMENTO_ID,
-    prefixo="ATENDIMENTOS ID(s)")
+    prefixo="ATENDIMENTO ID")
 print("Arquivo utilizado:", planinha_atendimento)
 lm = pd.read_excel(planinha_atendimento,sheet_name="ATENDIMENTO ID(s)",header=5)
 lm = lm.rename(columns={"N°RESERVA": "reserva"}) #altera o nome da coluna Nreserva para reserva
@@ -486,7 +486,7 @@ reservas_cliente_retira = set(cf["reserva"].dropna())
 #------------------------ fim conecta as planilhas ------------------------#
 
 #insere o arquivo em uma variavel
-arquivo_xlsx = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\BI\BI_Relatorio_Transito\Dados_Transitos\Fatos\2026\outubro\relatorio_transito{data_hoje}.xlsx")
+arquivo_xlsx = Path(rf"C:\Users\F252727\OneDrive - Claro SA\Planilha de Atendimento\BI\BI_Relatorio_Transito\Dados_Transitos\Fatos\2026\novembro\relatorio_transito{data_hoje}.xlsx")
 
 #normaliza todas as colunas RESERVAS das planilhas.
 dfs = [rt, r2026, r11sp, r2025, cpe, sobn,lm,cf]
